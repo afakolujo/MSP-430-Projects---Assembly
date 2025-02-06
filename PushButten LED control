@@ -1,0 +1,71 @@
+
+;-------------------------------------------------------------------------------
+; MSP430 Assembler Code Template for use with TI Code Composer Studio
+;
+;
+;-------------------------------------------------------------------------------
+ 
+          .cdecls C,LIST,"msp430.h"   ; Include device header file
+ 
+;-------------------------------------------------------------------------------
+ 
+          .def     RESET               ; Export program entry-point to
+                                        ; make it known to linker.
+;-------------------------------------------------------------------------------
+           .text                        ; Assemble into program memory.
+           .retain                      ; Override ELF conditional linking
+                                        ; and retain current section.
+           .retainrefs                  ; And retain any sections that have
+                                        ; references to current section.
+;-------------------------------------------------------------------------------
+_main
+RESET       mov.w #__STACK_END,SP       ; Initialize stackpointer
+StopWDT     mov.w #WDTPW|WDTHOLD,&WDTCTL ; Stop watchdog timer
+SetupP1     bic.b #BIT0,&P1OUT           ; sets up the Red LED
+            bis.b #BIT0,&P1DIR
+            bic.b #BIT7,&P9OUT           ; sets up the Green LED
+            bis.b #BIT7,&P9DIR
+            bic.b #BIT1+BIT2,&P1DIR      ; sets up the buttons
+            bis.b #BIT1+BIT2,&P1REN
+            bis.b #BIT1+BIT2,&P1OUT
+
+UnlockGPIO  bic.w #LOCKLPM5,&PM5CTL0      ; disables GPIO
+
+RLoop
+ 
+            bit.b #BIT1,&P1IN             ; tests the bit for zero or if it's being pressed
+            jz RedButton                  ; if the light isn't on jumps to the red button
+            mov.w  #0x00,R5               ; initializes the delay
+            bic.b #BIT0,&P1OUT            ; clears it if the LED is not on turning the LED off
+            jmp  GLoop                    ; jumps to the green loop if the red button isn't being pressed
+
+RedButton
+            mov.w #BIT0, R5               ; turns the red LED on
+GLoop
+            bit.b #BIT2,&P1IN             ; tests the bit for zero or if it's being pressed
+            jz  GreenButton               ; if the light isn't on jumps to the green button
+            mov.w #0x00, R6               ; initializes the delay
+            bic.b #BIT7,&P9OUT            ; clears it if the LED not on turning the LED off
+            jmp NLoop                     ; jumps to the no button pressed loop if the green button isn't being pressed
+
+GreenButton
+             mov.w #BIT7, R6              ; turns the red LED on
+NLoop
+             xor.b R5, &P1OUT             ; returns 1 if either bit 1 or bit 2 is 1 otherwise 0
+             xor.b R6, &P9OUT
+             mov.w #50000, R7             ; delay
+Loop         dec.w R7                     ; decrements everything by 1 creating a new loop for both LEDs to display on
+             jnz  Loop                    ; jumps back to this created loop if neither LEDs are on
+             jmp  RLoop                   ; jumps back to the red loop
+             nop
+;-------------------------------------------------------------------------------
+; Stack Pointer definition
+;-------------------------------------------------------------------------------
+             .global __STACK_END
+             .sect .stack
+ 
+;-------------------------------------------------------------------------------
+; Interrupt Vectors
+;-------------------------------------------------------------------------------
+             .sect ".reset"               ; MSP430 RESET Vector
+             .short RESET
