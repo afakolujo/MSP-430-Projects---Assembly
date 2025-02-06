@@ -1,0 +1,201 @@
+;******************************************************************************
+;  MSP430FR6989 ISR LED Counter w/ Debounce
+
+;   Built with Code Composer Studio V12.2.0
+;******************************************************************************
+;-------------------------------------------------------------------------------
+            .cdecls C,LIST,"msp430.h"       ; Include device header file
+;-------------------------------------------------------------------------------
+            .def    RESET                   ; Export program entry-point to
+                                            ; make it known to linker.
+;-------------------------------------------------------------------------------
+            .global _main
+            .global __STACK_END
+            .sect   .stack                  ; Make stack linker segment ?known?
+
+            .text                           ; Assemble to Flash memory
+            .retain                         ; Ensure current section gets linked
+            .retainrefs
+
+;-------------------------------------------------------------------------------
+_main
+RESET       mov.w   #__STACK_END,SP         ; Initialize stackpointer
+
+StopWDT     mov.w   #WDTPW+WDTHOLD,&WDTCTL  ; Stop WDT
+
+;-------------------------------------------------------------------------------
+; LED & BUTTON SETUP
+;-------------------------------------------------------------------------------
+SetupLED    bic.b   #BIT0,&P1OUT            ; Define LED1.0 power-on state = 1
+            bis.b   #BIT0,&P1DIR            ; Set LED1.0 to output direction
+            bic.b   #BIT7,&P9OUT            ; Define LED1.0 power-on state = 1
+            bis.b   #BIT7,&P9DIR            ; Set LED to output direction
+
+SetupPB     bic.b   #BIT1+BIT2, &P1DIR      ; Set P1.1 & P1.2 to input direction
+			bis.b   #BIT1+BIT2, &P1REN      ; Enable resistors on P1.1 & P1.2
+			bis.b   #BIT1+BIT2, &P1OUT      ; Set button resistors to pull up
+			bis.b   #BIT1+BIT2, &P1IES      ; Sets interrupt edge select to be high to low
+			bis.b   #BIT1+BIT2, &P1IE       ; Enable interrupts on P1.1 & P1.2
+
+;-------------------------------------------------------------------------------
+; TIMER SETUP
+;-------------------------------------------------------------------------------
+
+;-------------------------------------------------------------------------------
+; Timer A0 - 50ms delay - Used for debounce
+; Stop mode in combination with bit test at start of ISR (triggered after 50ms) effectively debounces
+SetupTA0	mov.w   #CCIE,&TA0CCTL0           				; TA0CCR0 interrupt enabled
+            mov.w   #49999,&TA0CCR0           				; count to 49999 for 50ms delay
+            bis.w   #TASSEL__SMCLK+MC__STOP,TA0CTL 			; SMCLK no input divisions
+;-------------------------------------------------------------------------------
+
+;-------------------------------------------------------------------------------
+; Timer A1 - 0.5s delay - Used to blink green LED according to counter
+; Stop mode means no clock resetting necessary in between blinks(?)
+SetupTA1	mov.w   #CCIE,&TA1CCTL0                     	; TA1CCR0 interrupt enabled
+            mov.w   #62499,&TA1CCR0                     	; count to 62499 for 0.5s delay
+            mov.w   #TASSEL__SMCLK+MC__STOP+ID_3,&TA1CTL  	; SMCLK, continuous mode, /8
+;-------------------------------------------------------------------------------
+
+;-------------------------------------------------------------------------------
+; Timer A2 - 0.5s delay - Used to blink red LED in LPM0 and both LEDs in LPM3
+; Up mode because blinking lights should be running at all times except for button press
+SetupTA2    mov.w   #CCIE,&TA2CCTL0         				; TA2CCR0 interrupt enabled
+            mov.w   #62499,&TA2CCR0							; count to 62499 for 0.5s delay
+            mov.w   #TASSEL__SMCLK+MC__UP+ID_3,&TA2CTL  	; SMCLK, up mode /8
+;-------------------------------------------------------------------------------
+
+;-------------------------------------------------------------------------------
+; Timer A3 - 5s delay - Used to count 5 seconds since last button press to enter LPM3
+; TA3R should be reset at every button press (@start PORT1_ISR)
+; ACLK persists through LPM3 and should always be running (reset repeatedly when green LED blinking)
+SetupTA3    mov.w   #CCIE,&TA3CCTL0         				; TACCR0 interrupt enabled
+            mov.w   #20479,&TA3CCR0							; count to 27999 for 5s delay
+            mov.w   #TASSEL__ACLK+MC__UP+ID_3,&TA3CTL  		; ACLK, up mode, /8
+;-------------------------------------------------------------------------------
+
+UnlockGPIO  bic.w   #LOCKLPM5,&PM5CTL0        ; Disable the GPIO power-on default
+
+			bic.b   #BIT1+BIT2, &P1IFG        ; Reset button interrupts after unlocking GPIO
+			                                  ; Sometimes they get triggered
+			mov.w	#0, R14					  ; Reset counter for button pushes
+
+            nop
+			bis.w   #LPM0+GIE,SR              ; Enable interrupts and enter low power mode 0
+            nop
+
+;-------------------------------------------------------------------------------
+TIMER0_A0_ISR;    Timer0_A3 CC0 Interrupt Service Routine
+; Come here when 1.1 is pressed to increment counter R14
+; ISR is called at end of 50ms timer, so bit test at front should effectively debounce
+;-------------------------------------------------------------------------------
+            bic.b	#BIT0, &P1OUT			; Clear red LED when pressing 1.1
+            bic.b	#BIT7, &P9OUT			; Also clear green LED out of LPM3 blink routine
+            bit.b	#BIT1, &P1IN			; Make sure button is still pressed after our delay (debounce)
+            jnz		TA0Exit					; If not dont count it as a press
+            inc		R14						; If press passes debounce, increment R14 (counter)
+			bic.b	#BIT0, &P1OUT			; Clear red LED again (consistency?)
+
+			;Drop here
+TA0Exit     bic.w   #MC__UP,&TA0CTL			; Stop the timer
+			reti
+
+;-------------------------------------------------------------------------------
+TIMER1_A0_ISR;    Timer1_A3 CC0 Interrupt Service Routine
+; Arrive here when P1.2 is pressed. Blink green LED according to # in R14 (counter) at 0.5s interval
+;-------------------------------------------------------------------------------
+            bic.b	#BIT0, &P1OUT			; Clear red LED (1.0)
+            xor.b	#BIT7, &P9OUT			; Blink green LED (9.7)
+            clr		TA3R					; 5 second delay into LPM3 shouldn't be running during this routine
+            dec		R14						; Decrement R14 (counter)
+            jnz		TA1Exit					; If R14 not zero, keep blinking
+            ;Drop here
+			bic.w   #MC__UP,&TA1CTL			; Stop the timer
+
+TA1Exit  	clr		TA3R					; Stops 5s timer inconsistencies coming out of green LED routine
+			reti
+
+;-------------------------------------------------------------------------------
+TIMER2_A0_ISR;    Timer2_A3 CC0 Interrupt Service Routine
+; Responsible for passive blinking of red LED in LPM0 and both LEDs in LPM3 at 0.5s interval
+;-------------------------------------------------------------------------------
+			bit.w	#MC__UP, &TA1CTL        ; Lock out of here if TA1 ISR (green LED blinking) is running
+			jnz		TA2Exit
+
+			bit.b	#BIT1, &P1IN			; If 1.1 is pressed, don't blink red LED
+			jz		TA2Exit
+
+			bit		#LPM3-LPM0, 0(SP)		; Bitwise AND on LPM3 and LPM0
+			jnz		BlinkBoth				; If result is non-zero, then LPM3 is on, jump to blink both routine
+
+			bic.b 	#BIT7, &P9OUT			; Clear green LED when not in LPM3
+
+			bit.b	#BIT1, &P1IN			; If 1.1 is pressed, don't blink red LED (consistency?)
+			jz		TA2Exit
+			;Drop here
+			xor 	#BIT0, &P1OUT			; Blink only red LED if not in LPM3
+			reti
+
+BlinkBoth:
+			clr		TA3R
+			xor 	#BIT7, &P9OUT			; Blink both LEDs if in LPM3
+			xor 	#BIT0, &P1OUT
+			reti
+
+TA2Exit		reti
+;-------------------------------------------------------------------------------
+TIMER3_A0_ISR;    Timer3_A3 CC0 Interrupt Service Routine
+; Arrive here when 5 seconds have passed without any button presses (time blinking green LED does not count)
+;-------------------------------------------------------------------------------
+			bic	#LPM0, 0(SP)		; Exit LPM0
+			bis #LPM3, 0(SP)		; Enter LPM3
+
+			bic #BIT7, &P9OUT		; Clear LEDs to fix any xor issues
+			bic #BIT0, &P1OUT
+			reti
+
+;-------------------------------------------------------------------------------
+PORT1_ISR;    Port 1 ISR Interrupt Service Routine
+; Come here first whenever button 1.1 or 1.2 are pressed
+;-------------------------------------------------------------------------------
+			bic		#LPM3, 0(SP)			; Exit LPM3
+			bis		#LPM0, 0(SP)			; Enter LPM0
+
+			clr		TA3R					; Reset 5s timer any time a button is pressed
+
+			bic.b	#BIT0, &P1OUT			; Clear red LED (consistency?)
+
+			bit.w	#MC__UP, &TA1CTL        ; Lock out of here if TA1 ISR (green LED blinking) is running
+			jnz		PORT1_Exit
+
+			bit.b	#BIT2, &P1IFG			; Is right button 1.2 pressed?
+			jnz		P2Pressed				; If it was pressed go to green LED blink routine
+
+P1Pressed   bis.w	#MC__UP+TACLR, &TA0CTL  ; Otherwise, P1 was pressed, start TA0 ISR
+
+PORT1_Exit	bic.b   #BIT1+BIT2, &P1IFG      ; Clear button flag
+            reti
+
+P2Pressed   tst		R14                     ; Protect from blinking when count is zero
+			jz		PORT1_Exit
+			bis.w	#MC__UP+TACLR, &TA1CTL  ; Start timer 1
+			rla		R14						; Double our counter for dec
+            jmp		PORT1_Exit
+            nop
+
+;------------------------------------------------------------------------------
+;           Interrupt Vectors
+;------------------------------------------------------------------------------
+            .sect   ".reset"                ; MSP430 RESET Vector
+            .short  RESET                   ;
+            .sect   TIMER0_A0_VECTOR        ; Timer0_A3 CC0 Interrupt Vector
+            .short  TIMER0_A0_ISR
+            .sect   TIMER1_A0_VECTOR        ; Timer1_A3 CC0 Interrupt Vector
+            .short  TIMER1_A0_ISR
+            .sect   TIMER2_A0_VECTOR        ; Timer2_A3 CC0 Interrupt Vector
+            .short  TIMER2_A0_ISR
+            .sect   TIMER3_A0_VECTOR        ; Timer3_A3 CC0 Interrupt Vector
+            .short  TIMER3_A0_ISR
+            .sect   PORT1_VECTOR            ; Port1 Interrupt Vector
+            .short  PORT1_ISR
+            .end
